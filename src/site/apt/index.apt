@@ -1,1 +1,454 @@
-Jahia 6.5
+Jahia 6.5 - Page Hit Module
+
+ The page hit module will store the number of hits on each page of your platform in custom tables. It does that by monitoring the logs from Jahia 65
+ using Apache Camel, grouping this analysis in batches to avoid hitting the database too often for performance.
+
+ Describing how this module works will allow us to show you how to :
+
+    * develop/connect to your own custom tables using HIBERNATE framework
+
+    * Monitor log using Apache Camel
+
+    * Insert/Update/Read datas from HIBERNATE
+
+    * Create your custom taglib to make reuse of your module data easier in other modules
+
+* Adding custom tables in your Jahia 6.5
+
+ Define your persistent bean using annotations
+
++----------------------------------------
+package org.jahia.modules.pagehit;
+import javax.persistence.*;
+
+@Entity
+@Table(name = "jahia_pagehit")
+public class PageHit implements Serializable{
+
+    private static final long serialVersionUID = 636269287295922913L;
+    private Long hits;
+    private String path;
+    private String uuid;
+
+
+    public PageHit() {
+
+    }
+
+    public PageHit(Long hits, String path, String uuid) {
+        this.hits = hits;
+        this.path = path;
+        this.uuid = uuid;
+    }
+
+    @Id
+    @Column(length = 36)
+    public String getUuid() {
+        return uuid;
+    }
+
+    public void setUuid(String uuid) {
+        this.uuid = uuid;
+    }
+
+    @Basic
+    public Long getHits() {
+        return hits;
+    }
+
+    public void setHits(Long hits) {
+        this.hits = hits;
+    }
+
+    @Lob
+    @Column (name = "page_path")
+    public String getPath() {
+        return path;
+    }
+
+    public void setPath(String path) {
+        this.path = path;
+    }
+}
++----------------------------------------
+
+ On startup Jahia 6.5 will lauch HIBERNATE, this will scan the packages "org.jahia.modules" for classes with the @Entity
+ annotation. Look at the <<<applicationcontext-hibernate.xml>>> file to customize the packages scanned by HIBERNATE.
+
++------------------------------------
+<property name="packagesToScan" value="org.jahia.modules"/>
++------------------------------------
+
+
+* How to generate the SQL files for my tables
+
+ Define configuration for your target DBMS, in a tools folder at the root level of your project :
+
++--------------------------
+tools/mysql.hibernate.cfg.xml:
+
+ <!DOCTYPE hibernate-configuration PUBLIC
+     "-//Hibernate/Hibernate Configuration DTD 3.0//EN"
+     "http://hibernate.sourceforge.net/hibernate-configuration-3.0.dtd">
+
+ <hibernate-configuration>
+ 	<session-factory>
+ 		<property name="dialect">org.hibernate.dialect.MySQL5InnoDBDialect</property>
+ 		<mapping class="org.jahia.modules.pagehit.PageHit" />
+ 	</session-factory>
+ </hibernate-configuration>
++--------------------------
+
+ Then in your pom.xml define a profile to generate your ddl :
+
++----------------------------
+<profile>
+    <id>generate-ddl</id>
+    <activation>
+        <property>
+            <name>jahia.generate.ddl</name>
+            <value>true</value>
+        </property>
+    </activation>
+    <build>
+        <plugins>
+		    <plugin>
+		        <groupId>org.apache.maven.plugins</groupId>
+		        <artifactId>maven-antrun-plugin</artifactId>
+		        <version>${antrun.plugin.version}</version>
+		        <dependencies>
+				    <dependency>
+					    <groupId>org.jahia.server</groupId>
+					    <artifactId>jahia-impl</artifactId>
+					    <version>6.5-SNAPSHOT</version>
+					    <scope>provided</scope>
+					</dependency>
+		            <dependency>
+		                <groupId>org.hibernate</groupId>
+		                <artifactId>hibernate-core</artifactId>
+		                <version>${hibernate.version}</version>
+		            </dependency>
+		            <dependency>
+		                <groupId>org.hibernate</groupId>
+		                <artifactId>hibernate-tools</artifactId>
+		                <version>3.2.3.GA</version>
+		            </dependency>
+		            <dependency>
+		                <groupId>org.slf4j</groupId>
+		                <artifactId>slf4j-log4j12</artifactId>
+		                <version>1.5.11</version>
+		            </dependency>
+		        </dependencies>
+		        <executions>
+		            <execution>
+		                <id>generate-ddl</id>
+		                <phase>process-classes</phase>
+		                <goals>
+		                    <goal>run</goal>
+		                </goals>
+		                <configuration>
+		                    <tasks if="jahia.generate.ddl">
+		                        <echo message="Generating DDL schemata..." />
+                				<property name="runtime_classpath" refid="maven.runtime.classpath" />
+		                        <taskdef name="hibernatetool" classname="org.hibernate.tool.ant.HibernateToolTask">
+		                            <classpath>
+		                                <path refid="maven.dependency.classpath" />
+		                                <pathelement path="${maven.build.dest}" />
+		                                <pathelement path="${maven.test.dest}" />
+		                            </classpath>
+		                        </taskdef>
+		                        <mkdir dir="${basedir}/src/main/webapp/META-INF/db/mysql" />
+								<hibernatetool destdir="${basedir}/src/main/webapp/META-INF/db/mysql/">
+								    <classpath path="${runtime_classpath}" />
+									<annotationconfiguration configurationfile="${basedir}/tools/mysql.hibernate.cfg.xml" />
+									<hbm2ddl outputfilename="jahia-pagehit-schema.sql" format="true" export="false" drop="true" />
+								</hibernatetool>
+		                    </tasks>
+		                </configuration>
+		            </execution>
+		        </executions>
+		    </plugin>
+        </plugins>
+    </build>
+</profile>
++----------------------------
+
+ This profile will generate a SQL file in the META-INF/db/mysql folder of your project, that you can run to create your tables.
+ Just call :
+
++---------------------------
+mvn -P generate-ddl install
++---------------------------
+
+ ** Tables are not automatically deployed at runtime
+
+  Your newly created tables are not automatically deployed in your database, during development they will be created by the
+  Jahia maven plugin using the goal configure <<<<mvn jahia:configure>>>. Otherwise on an integration/production platform
+  you will have to execute the sql files manually.
+
+
+* Access HIBERNATE session from my module
+
+ To access the hibernate session from your module, you just need to inject the SessionFactroy from hibernate in of one of your
+ SPRING beans, in your SPRING module file (here mod-pagehit.xml).
+
++---------------------------
+<bean id="pageHitService" class="org.jahia.modules.pagehit.PageHitService"
+          init-method="start" factory-method="getInstance">
+    <property name="sessionFactoryBean" ref="sessionFactory"/>
+    <property name="from" value="seda:logMsgs"/>
+    <property name="cacheProviders" ref="ehCacheProvider"/>
+    <property name="maxNumberOfHitsInCacheBeforeFlush" value="100"/>
+</bean>
+
+public class PageHitService implements Processor, CamelContextAware, InitializingBean {
+
+    private SessionFactoryImpl sessionFactoryBean;
+
+    public void setSessionFactoryBean(SessionFactoryImpl sessionFactoryBean) {
+        this.sessionFactoryBean = sessionFactoryBean;
+    }
+}
++---------------------------
+
+ Then you just need to call <<<sessionFactoryBean.openSession()>>> to get an HIBERNATE Session object.
+
+** Insert content in the database
+
+ After opening the HIBERNATE session, create a new PageHit object and store it in the database:
+
++-----------------------------
+ session = sessionFactoryBean.openSession();
+
+ pageHit = new PageHit();
+ Long hit = (long) 1;
+ pageHit.setHits(hit);
+ pageHit.setPath(path);
+ pageHit.setUuid(uuid);
+ session.save(pageHit);
+ session.flush();
++-----------------------------
+
+** Update existing content
+
+ After opening the HIBERNATE session, read the existing object and update it :
+
++-----------------------------
+PageHit pageHit = (PageHit) session.get(PageHit.class, uuid);
+// Found Update object
+if (pageHit != null) {
+   pageHit.setHits(pageHit.getHits() + 1);
+   if(!path.equals(pageHit.getPath())){
+       pageHit.setPath(path);
+   }
+   Element elementNew = new Element("pageHitUuid" + uuid, pageHit);
+   pageHitCache.put(elementNew);
+   session.flush();
+}
++--------------------------
+
+* Read Jahia 6.5 log to get page hit information from Apache Camel
+
+ Implement CamelContextAware on your bean to add your custom route in Camel after startup :
+
++---------------------------
+public class PageHitService implements Processor, CamelContextAware, InitializingBean {
+    private Pattern pattern = Pattern.compile(
+            "([0-9\\-]+ [0-9:,]+) user ([a-zA-Z@.0-9_\\-]+) ip ([0-9.:]+) session ([a-zA-Z@0-9_\\-\\/]+) identifier ([a-zA-Z@0-9_\\-\\/]+) path (.*) nodetype ([a-zA-Z:]+) page viewed with (.*)");
+    private CamelContext camelContext;
+
+    public void setCamelContext(final CamelContext camelContext) {
+        this.camelContext = camelContext;
+        final PageHitService pageHitService = this;
+        try {
+            camelContext.addRoutes(new RouteBuilder() {
+                @Override
+                public void configure() throws Exception {
+                    from(from).filter("groovy", "request.body.contains(\"page viewed\")").to(new ProcessorEndpoint(
+                            "pageHitService", camelContext, pageHitService));
+                }
+            });
+        } catch (Exception e) {
+            logger.error(e.getMessage(), e);
+        }
+    }
+
+    public CamelContext getCamelContext() {
+        return camelContext;
+    }
+}
++---------------------------
+
+ Here we define a route that will filter the incoming messages from <<<<seda:logMsgs>>>> (defined inside the mod-pahehit.xml file)
+ using some groovy constraints, and redirect the message to an endpoint defined as PageHitService itself.
+
+** Now let us process the message :
+
++---------------------------------
+public void process(Exchange exchange) throws Exception {
+        final String message = (String) exchange.getIn().getBody();
+        final Matcher matcher = pattern.matcher(message);
+        Session session = null;
+        if (matcher.matches()) {
+            final String path = matcher.group(6);
+            final String uuid = matcher.group(5);
+            if (pageHitCache.get("pageHitUuid" + uuid) != null) {
+                //if exist in cache, increment and update in cache
+                PageHit pageHit = (PageHit) pageHitCache.get("pageHitUuid" + uuid).getValue();
+                pageHit.setHits(pageHit.getHits() + 1);
+                if (!path.equals(pageHit.getPath())) {
+                    pageHit.setPath(path);
+                }
+                Element elementToUpdate = new Element("pageHitUuid" + uuid, pageHit);
+                pageHitCache.put(elementToUpdate);
+                //if is the time to update in database
+                if(pageHit.getHits() % maxNumberOfHitsInCacheBeforeFlush == 0){
+                    session = sessionFactoryBean.openSession();
+                    PageHit pageHitToUpdate = (PageHit) session.get(PageHit.class, uuid);
+                    pageHitToUpdate.setHits(pageHit.getHits());
+                    if(!pageHitToUpdate.getPath().equals(pageHit.getPath())) pageHitToUpdate.setPath(pageHit.getPath());
+                    session.flush();
+                }
+            } else {
+                //if not exist in cache recup pageHit from database, increment it and cache it
+                session = sessionFactoryBean.openSession();
+                try {
+                    PageHit pageHit = (PageHit) session.get(PageHit.class, uuid);
+                    // Found Update object
+                    if (pageHit != null) {
+                        pageHit.setHits(pageHit.getHits() + 1);
+                        if(!path.equals(pageHit.getPath())){
+                            pageHit.setPath(path);
+                        }
+                        Element elementNew = new Element("pageHitUuid" + uuid, pageHit);
+                        pageHitCache.put(elementNew);
+                        //if is the time to update in database
+                        if(pageHit.getHits() % maxNumberOfHitsInCacheBeforeFlush == 0){
+                            session.flush();
+                        }
+                    }
+                    // Not found new object
+                    else {
+                        pageHit = new PageHit();
+                        Long hit = (long) 1;
+                        pageHit.setHits(hit);
+                        pageHit.setPath(path);
+                        pageHit.setUuid(uuid);
+                        if (logger.isDebugEnabled()) {
+                            logger.debug("Insert into database pageHit page's path: " + pageHit.getPath() + " with number of view: " + pageHit.getHits());
+                        }
+                        session.save(pageHit);
+                        session.flush();
+                    }
+                } catch (HibernateException e) {
+                    logger.error(e.getMessage(), e);
+                }
+            }
+        }
+        if(session != null){
+            session.close();
+        }
+    }
++---------------------------------
+
+ This example also introduce the usage of a local cache to only hit the database every <<<maxNumberOfHitsInCacheBeforeFlush>>> (by default 100).
+ The cache is initialized using the CacheProvider from Jahia 6.5.
+
+* Use a cache in my module
+
+ Using a cache in your module can help a lot if you reach performance issues, here we add a cache that will allow us to
+ only hit the database every 100th hits on the same page. This allow to not hit the database too often and alos to not
+ lose many data in case of crashing.
+
++-----------------------
+public class PageHitService implements Processor, CamelContextAware, InitializingBean {
+    private EhCacheProvider cacheProviders;
+    private int maxNumberOfHitsInCacheBeforeFlush;
+    private Cache pageHitCache;
+
+    public void setCacheProviders(EhCacheProvider cacheProviders) {
+        this.cacheProviders = cacheProviders;
+    }
+
+    public void setMaxNumberOfHitsInCacheBeforeFlush(int maxNumberOfHitsInCacheBeforeFlush) {
+        this.maxNumberOfHitsInCacheBeforeFlush = maxNumberOfHitsInCacheBeforeFlush;
+    }
+
+    public void afterPropertiesSet() throws Exception {
+        CacheManager cacheManager = cacheProviders.getCacheManager();
+        pageHitCache = cacheManager.getCache("PageHitsCache");
+        if (pageHitCache == null) {
+            cacheManager.addCache("PageHitsCache");
+            pageHitCache = cacheManager.getCache("PageHitsCache");
+        }
+        pageHitCache.setStatisticsEnabled(cacheProviders.isStatisticsEnabled());
+    }
+}
++-----------------------
+
+* Create a taglib function to get the number of hits on a page from any modules
+
+ First we need to define a tld file in our project under <<src/main/resources/META-INF>>.
+
++-----------------------
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<taglib xmlns="http://java.sun.com/xml/ns/j2ee"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://java.sun.com/xml/ns/j2ee http://java.sun.com/xml/ns/j2ee/web-jsptaglibrary_2_0.xsd"
+        version="2.0">
+
+    <description>Jahia Page Hit module functions library</description>
+    <display-name>Jahia Page Hit Service</display-name>
+    <tlib-version>6.5</tlib-version>
+    <short-name>pageHits</short-name>
+    <uri>http://www.jahia.org/tags/pageHits</uri>
+    <function>
+        <description> </description>
+        <name>getNumberOfHits</name>
+        <function-class>org.jahia.modules.pagehit.PageHitFunctions</function-class>
+        <function-signature>long getNumberOFHits(org.jahia.services.content.JCRNodeWrapper)</function-signature>
+        <example>${pagehits:getNumberOfHits(renderContext.mainResource.node)}</example>
+    </function>
+</taglib>
++-----------------------
+
+** Now define the function itself in the PageHitFunctions class
+
++-----------------------
+public class PageHitFunctions {
+
+    public static long getNumberOFHits(JCRNodeWrapper node){
+        try{
+            PageHitService pageHitService = (PageHitService) SpringContextSingleton.getInstance().getModuleContext().getBean("pageHitService");
+            return pageHitService.getNumberOfHits(node);
+        } catch (Exception e){
+            return 0;
+        }
+    }
+}
++-----------------------
+
+ Look at the code for <<<getNumberOfHits(JCRNodeWrapper)>>>
+
++-----------------------
+public long getNumberOfHits(JCRNodeWrapper node) {
+    Session session = null;
+    PageHit pageHit;
+    try {
+        if (pageHitCache.get("pageHitUuid" + node.getIdentifier()) != null) {
+            pageHit = (PageHit) pageHitCache.get("pageHitUuid" + node.getIdentifier()).getValue();
+        } else {
+            session = sessionFactoryBean.openSession();
+            Criteria criteria = session.createCriteria(PageHit.class);
+            criteria.add(Restrictions.eq("uuid", node.getIdentifier()));
+            pageHit = (PageHit) criteria.uniqueResult();
+        }
+        return pageHit != null ? pageHit.getHits() : 0;
+    } catch (Exception e) {
+        return 0;
+    } finally {
+        if (session != null) session.close();
+    }
+}
++-----------------------
